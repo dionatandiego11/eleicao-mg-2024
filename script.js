@@ -60,6 +60,8 @@ const legendHighEl = document.getElementById('legend-high');
 const NODE_MIN_RADIUS = 0.5;
 const NODE_MAX_RADIUS = 5.0;
 const BASE_EDGE_STYLE = { color: '#ffffff', weight: 0.9, opacity: 0.08, smoothFactor: 1 };
+const DATA_CACHE_KEY = 'mg-graph-data-cache-v1:latest';
+const MAX_LOCAL_CACHE_BYTES = 4.5 * 1024 * 1024;
 
 const CARGO_LABELS = {
     deputado_estadual: 'Deputado Estadual',
@@ -75,6 +77,9 @@ const state = {
     markerByNodeId: new Map(),
     edgeLayers: [],
     nodeByNormalizedName: new Map(),
+    nodeSearchEntries: [],
+    nodeIndexById: new Map(),
+    turnContexts: new Map(),
     selectedMarker: null,
     selectedNode: null,
     selectedCargo: null,
@@ -315,33 +320,295 @@ function normalizeEdge(raw) {
     };
 }
 
+function buildTurnContextKey(cargoKey, turnKey) {
+    if (!cargoKey || !turnKey) {
+        return null;
+    }
+    return `${cargoKey}|${String(turnKey)}`;
+}
+
+function createEntityStats({ key, label, party, number }, nodeCount) {
+    return {
+        key,
+        label,
+        party: party || 'SEM_PARTIDO',
+        number: number || '',
+        votesByNode: new Float64Array(nodeCount),
+        totalVotes: 0,
+        citiesWithVotes: 0,
+        topCityIndex: -1,
+        topCityVotes: 0,
+        leaderCities: 0,
+        percentByNode: null,
+        maxPercent: 0,
+        sumPercent: 0,
+    };
+}
+
+function getOrCreateTurnContext(turnContexts, cargoKey, turnKey, nodeCount) {
+    const key = buildTurnContextKey(cargoKey, turnKey);
+    if (!key) {
+        return null;
+    }
+    let context = turnContexts.get(key);
+    if (!context) {
+        context = {
+            cargoKey,
+            turnKey: String(turnKey),
+            validVotesByNode: new Float64Array(nodeCount),
+            hasTurnDataByNode: new Uint8Array(nodeCount),
+            citiesWithTurnData: 0,
+            totalValidVotes: 0,
+            entities: {
+                party: new Map(),
+                candidate: new Map(),
+            },
+            options: {
+                party: [],
+                candidate: [],
+            },
+        };
+        turnContexts.set(key, context);
+    }
+    return context;
+}
+
+function ensurePercentMetrics(entityStats, turnContext) {
+    if (!entityStats || !turnContext || entityStats.percentByNode) {
+        return;
+    }
+
+    const percentByNode = new Float64Array(state.nodes.length);
+    let maxPercent = 0;
+    let sumPercent = 0;
+
+    for (let index = 0; index < state.nodes.length; index += 1) {
+        const validVotes = turnContext.validVotesByNode[index];
+        const votes = entityStats.votesByNode[index];
+        const percent = validVotes > 0 ? (votes * 100) / validVotes : 0;
+        percentByNode[index] = percent;
+        sumPercent += percent;
+        if (percent > maxPercent) {
+            maxPercent = percent;
+        }
+    }
+
+    entityStats.percentByNode = percentByNode;
+    entityStats.maxPercent = maxPercent;
+    entityStats.sumPercent = sumPercent;
+}
+
+function getTurnContext(cargoKey = state.selectedCargo, turnKey = state.selectedTurn) {
+    const key = buildTurnContextKey(cargoKey, turnKey);
+    if (!key) {
+        return null;
+    }
+    return state.turnContexts.get(key) || null;
+}
+
+function getEntityStatsFromContext(turnContext, entityType, entityKey) {
+    if (!turnContext || !entityKey) {
+        return null;
+    }
+    const byType = entityType === 'candidate' ? turnContext.entities.candidate : turnContext.entities.party;
+    return byType.get(entityKey) || null;
+}
+
+function getSelectedEntityStats() {
+    const turnContext = getTurnContext();
+    if (!turnContext) {
+        return { turnContext: null, entityStats: null };
+    }
+    const entityStats = getEntityStatsFromContext(turnContext, state.entityType, state.entityKey);
+    return { turnContext, entityStats };
+}
+
+function getMetricForNode(nodeId, turnContext, entityStats) {
+    if (!turnContext || !entityStats) {
+        return 0;
+    }
+    const nodeIndex = state.nodeIndexById.get(nodeId);
+    if (typeof nodeIndex !== 'number') {
+        return 0;
+    }
+    if (state.metricMode === 'percent') {
+        ensurePercentMetrics(entityStats, turnContext);
+        return Math.max(0, safeNumber(entityStats.percentByNode[nodeIndex], 0));
+    }
+    return Math.max(0, safeNumber(entityStats.votesByNode[nodeIndex], 0));
+}
+
+function buildTurnContexts(nodes) {
+    const nodeCount = nodes.length;
+    state.nodeIndexById = new Map();
+    nodes.forEach((node, index) => {
+        state.nodeIndexById.set(node.id, index);
+    });
+
+    const turnContexts = new Map();
+
+    nodes.forEach((node, nodeIndex) => {
+        Object.entries(node.election || {}).forEach(([cargoKey, cargoPayload]) => {
+            Object.entries(cargoPayload || {}).forEach(([turnKey, turnData]) => {
+                const context = getOrCreateTurnContext(turnContexts, cargoKey, turnKey, nodeCount);
+                if (!context) {
+                    return;
+                }
+
+                if (!context.hasTurnDataByNode[nodeIndex]) {
+                    context.hasTurnDataByNode[nodeIndex] = 1;
+                    context.citiesWithTurnData += 1;
+                }
+
+                const validVotes = Math.max(0, safeNumber(turnData.valid_votes_total, 0));
+                context.validVotesByNode[nodeIndex] = validVotes;
+                context.totalValidVotes += validVotes;
+
+                Object.entries(turnData.party_votes || {}).forEach(([party, rawVotes]) => {
+                    const votes = Math.max(0, safeNumber(rawVotes, 0));
+                    let partyStats = context.entities.party.get(party);
+                    if (!partyStats) {
+                        partyStats = createEntityStats(
+                            {
+                                key: party,
+                                label: party,
+                                party,
+                                number: '',
+                            },
+                            nodeCount
+                        );
+                        context.entities.party.set(party, partyStats);
+                    }
+
+                    partyStats.votesByNode[nodeIndex] = votes;
+                    partyStats.totalVotes += votes;
+                    if (votes > 0) {
+                        partyStats.citiesWithVotes += 1;
+                    }
+                    if (votes > partyStats.topCityVotes) {
+                        partyStats.topCityVotes = votes;
+                        partyStats.topCityIndex = nodeIndex;
+                    }
+                });
+
+                (turnData.candidate_votes || []).forEach((candidate) => {
+                    const candidateId = String(candidate?.candidate_id || '').trim();
+                    if (!candidateId) {
+                        return;
+                    }
+
+                    const votes = Math.max(0, safeNumber(candidate.votes, 0));
+                    let candidateStats = context.entities.candidate.get(candidateId);
+                    if (!candidateStats) {
+                        candidateStats = createEntityStats(
+                            {
+                                key: candidateId,
+                                label: candidate.label || candidate.ballot_name || candidate.name || candidateId,
+                                party: candidate.party || 'SEM_PARTIDO',
+                                number: candidate.number || '',
+                            },
+                            nodeCount
+                        );
+                        context.entities.candidate.set(candidateId, candidateStats);
+                    }
+
+                    candidateStats.votesByNode[nodeIndex] = votes;
+                    candidateStats.totalVotes += votes;
+                    if (votes > 0) {
+                        candidateStats.citiesWithVotes += 1;
+                    }
+                    if (votes > candidateStats.topCityVotes) {
+                        candidateStats.topCityVotes = votes;
+                        candidateStats.topCityIndex = nodeIndex;
+                    }
+                });
+
+                const leaderParty = String(turnData.leader_party || '').trim();
+                if (leaderParty) {
+                    const leaderPartyStats = context.entities.party.get(leaderParty);
+                    if (leaderPartyStats) {
+                        leaderPartyStats.leaderCities += 1;
+                    }
+                }
+
+                const leaderCandidateId = String(turnData.leader_candidate_id || '').trim();
+                if (leaderCandidateId) {
+                    const leaderCandidateStats = context.entities.candidate.get(leaderCandidateId);
+                    if (leaderCandidateStats) {
+                        leaderCandidateStats.leaderCities += 1;
+                    }
+                }
+            });
+        });
+    });
+
+    turnContexts.forEach((context) => {
+        context.options.party = Array.from(context.entities.party.values())
+            .map((entity) => ({
+                key: entity.key,
+                label: entity.label,
+                totalVotes: entity.totalVotes,
+            }))
+            .sort((a, b) => b.totalVotes - a.totalVotes || a.label.localeCompare(b.label, 'pt-BR'));
+
+        context.options.candidate = Array.from(context.entities.candidate.values())
+            .map((entity) => ({
+                key: entity.key,
+                label: `${entity.label} (${entity.party}${entity.number ? ` ${entity.number}` : ''})`,
+                totalVotes: entity.totalVotes,
+            }))
+            .sort((a, b) => b.totalVotes - a.totalVotes || a.label.localeCompare(b.label, 'pt-BR'));
+    });
+
+    state.turnContexts = turnContexts;
+}
+
+function readCachedPayload() {
+    try {
+        const serialized = window.localStorage.getItem(DATA_CACHE_KEY);
+        if (!serialized) {
+            return null;
+        }
+        const parsed = JSON.parse(serialized);
+        if (!parsed || typeof parsed !== 'object' || !parsed.payload) {
+            window.localStorage.removeItem(DATA_CACHE_KEY);
+            return null;
+        }
+        return parsed;
+    } catch (error) {
+        console.warn('Invalid cached graph payload. Cache will be cleared.', error);
+        try {
+            window.localStorage.removeItem(DATA_CACHE_KEY);
+        } catch (clearError) {
+            console.warn('Failed to clear local cache.', clearError);
+        }
+        return null;
+    }
+}
+
+function writeCachedPayload(path, payload) {
+    try {
+        const record = {
+            path,
+            cached_at_utc: new Date().toISOString(),
+            generated_at_utc: payload?.metadata?.generated_at_utc || null,
+            payload,
+        };
+        const serialized = JSON.stringify(record);
+        if (serialized.length * 2 > MAX_LOCAL_CACHE_BYTES) {
+            return;
+        }
+        window.localStorage.setItem(DATA_CACHE_KEY, serialized);
+    } catch (error) {
+        console.warn('Unable to persist graph cache locally.', error);
+    }
+}
+
 function getTurnData(node, cargoKey = state.selectedCargo, turnKey = state.selectedTurn) {
     if (!node?.election || !cargoKey || !turnKey) {
         return null;
     }
     return node.election?.[cargoKey]?.[String(turnKey)] || null;
-}
-
-function getVotesForEntity(turnData, entityType, entityKey) {
-    if (!turnData || !entityKey) {
-        return 0;
-    }
-
-    if (entityType === 'candidate') {
-        const candidate = turnData.candidate_votes?.find((item) => item.candidate_id === entityKey);
-        return candidate ? Math.max(0, safeNumber(candidate.votes, 0)) : 0;
-    }
-
-    return Math.max(0, safeNumber(turnData.party_votes?.[entityKey], 0));
-}
-
-function getMetricValue(turnData, entityType, entityKey) {
-    const votes = getVotesForEntity(turnData, entityType, entityKey);
-    if (state.metricMode === 'percent') {
-        const validVotes = Math.max(0, safeNumber(turnData?.valid_votes_total, 0));
-        return validVotes > 0 ? (votes * 100) / validVotes : 0;
-    }
-    return votes;
 }
 
 function getVoteRadius(metricValue, maxMetric) {
@@ -415,7 +682,8 @@ function showNodeInfo(node) {
     infoSelectedEntityEl.textContent = getSelectedEntityLabel();
 
     const turnData = getTurnData(node);
-    if (!turnData || !state.entityKey) {
+    const { turnContext, entityStats } = getSelectedEntityStats();
+    if (!turnData || !state.entityKey || !turnContext || !entityStats) {
         infoSelectedValueEl.textContent = state.metricMode === 'percent' ? '0%' : '0';
         infoStateAvgValueEl.textContent = state.metricMode === 'percent' ? '0%' : '0';
         infoStateDeltaEl.textContent = '-';
@@ -426,7 +694,7 @@ function showNodeInfo(node) {
         return;
     }
 
-    const cityMetric = getMetricValue(turnData, state.entityType, state.entityKey);
+    const cityMetric = getMetricForNode(node.id, turnContext, entityStats);
     const stateAverage = state.currentStateAverage;
     infoSelectedValueEl.textContent = formatMetric(cityMetric);
     infoStateAvgValueEl.textContent = formatMetric(stateAverage);
@@ -485,6 +753,17 @@ function focusNode(node, flyTo = false) {
 }
 
 function collectCargos(nodes) {
+    if (state.turnContexts.size > 0) {
+        const cargosFromContext = new Set();
+        state.turnContexts.forEach((context) => {
+            cargosFromContext.add(context.cargoKey);
+        });
+        if (cargosFromContext.size > 0) {
+            return Array.from(cargosFromContext)
+                .sort((a, b) => formatCargoLabel(a).localeCompare(formatCargoLabel(b), 'pt-BR'));
+        }
+    }
+
     const cargos = new Set();
     nodes.forEach((node) => {
         Object.keys(node.election || {}).forEach((cargoKey) => cargos.add(cargoKey));
@@ -493,6 +772,18 @@ function collectCargos(nodes) {
 }
 
 function collectTurns(nodes, cargoKey) {
+    if (state.turnContexts.size > 0 && cargoKey) {
+        const turnsFromContext = new Set();
+        state.turnContexts.forEach((context) => {
+            if (context.cargoKey === cargoKey) {
+                turnsFromContext.add(String(context.turnKey));
+            }
+        });
+        if (turnsFromContext.size > 0) {
+            return Array.from(turnsFromContext).sort((a, b) => Number(a) - Number(b));
+        }
+    }
+
     const turns = new Set();
     nodes.forEach((node) => {
         const cargoPayload = node.election?.[cargoKey];
@@ -505,6 +796,11 @@ function collectTurns(nodes, cargoKey) {
 }
 
 function collectParties(nodes, cargoKey, turnKey) {
+    const turnContext = getTurnContext(cargoKey, turnKey);
+    if (turnContext) {
+        return turnContext.options.party.slice();
+    }
+
     const totals = new Map();
     nodes.forEach((node) => {
         const turnData = getTurnData(node, cargoKey, turnKey);
@@ -522,6 +818,11 @@ function collectParties(nodes, cargoKey, turnKey) {
 }
 
 function collectCandidates(nodes, cargoKey, turnKey) {
+    const turnContext = getTurnContext(cargoKey, turnKey);
+    if (turnContext) {
+        return turnContext.options.candidate.slice();
+    }
+
     const totals = new Map();
     nodes.forEach((node) => {
         const turnData = getTurnData(node, cargoKey, turnKey);
@@ -603,47 +904,37 @@ function updateEntitySummary() {
         return;
     }
 
-    let totalVotes = 0;
-    let topCityName = '-';
-    let topCityVotes = 0;
-    let citiesWithVotes = 0;
-    let citiesWithTurnData = 0;
-    let sumMetric = 0;
-    let leaderCities = 0;
-    let totalValidVotes = 0;
+    const { turnContext, entityStats } = getSelectedEntityStats();
+    if (!turnContext || !entityStats) {
+        entitySummaryEl.textContent = 'Entidade sem dados para o recorte atual.';
+        state.currentStateAverage = 0;
+        return;
+    }
 
-    state.nodes.forEach((node) => {
-        const turnData = getTurnData(node);
-        if (!turnData) {
-            return;
-        }
-        citiesWithTurnData += 1;
-        const votes = getVotesForEntity(turnData, state.entityType, state.entityKey);
-        const metric = getMetricValue(turnData, state.entityType, state.entityKey);
+    const totalVotes = entityStats.totalVotes;
+    const topCityName = entityStats.topCityIndex >= 0
+        ? state.nodes[entityStats.topCityIndex]?.name || '-'
+        : '-';
+    const topCityVotes = entityStats.topCityVotes;
+    const citiesWithVotes = entityStats.citiesWithVotes;
+    const leaderCities = entityStats.leaderCities;
 
-        totalVotes += votes;
-        sumMetric += metric;
-        totalValidVotes += Math.max(0, safeNumber(turnData.valid_votes_total, 0));
-        if (votes > 0) {
-            citiesWithVotes += 1;
-        }
-        if (votes > topCityVotes) {
-            topCityVotes = votes;
-            topCityName = node.name;
-        }
-
-        if (state.entityType === 'party' && turnData.leader_party === state.entityKey) {
-            leaderCities += 1;
-        }
-        if (state.entityType === 'candidate' && turnData.leader_candidate_id === state.entityKey) {
-            leaderCities += 1;
-        }
-    });
-
-    const citySimpleAverage = citiesWithTurnData > 0 ? sumMetric / citiesWithTurnData : 0;
-    const stateAverage = state.metricMode === 'percent'
-        ? (totalValidVotes > 0 ? (totalVotes * 100) / totalValidVotes : 0)
-        : citySimpleAverage;
+    let citySimpleAverage = 0;
+    let stateAverage = 0;
+    if (state.metricMode === 'percent') {
+        ensurePercentMetrics(entityStats, turnContext);
+        citySimpleAverage = turnContext.citiesWithTurnData > 0
+            ? entityStats.sumPercent / turnContext.citiesWithTurnData
+            : 0;
+        stateAverage = turnContext.totalValidVotes > 0
+            ? (totalVotes * 100) / turnContext.totalValidVotes
+            : 0;
+    } else {
+        citySimpleAverage = turnContext.citiesWithTurnData > 0
+            ? totalVotes / turnContext.citiesWithTurnData
+            : 0;
+        stateAverage = citySimpleAverage;
+    }
     state.currentStateAverage = stateAverage;
 
     const cargoLabel = formatCargoLabel(state.selectedCargo);
@@ -725,31 +1016,41 @@ function applyEntityStyling() {
         return;
     }
 
+    const { turnContext, entityStats } = getSelectedEntityStats();
     let maxMetric = 0;
-    state.nodes.forEach((node) => {
-        const turnData = getTurnData(node);
-        const metric = getMetricValue(turnData, state.entityType, state.entityKey);
-        if (metric > maxMetric) {
-            maxMetric = metric;
+    if (turnContext && entityStats) {
+        if (state.metricMode === 'percent') {
+            ensurePercentMetrics(entityStats, turnContext);
+            maxMetric = Math.max(0, safeNumber(entityStats.maxPercent, 0));
+        } else {
+            maxMetric = Math.max(0, safeNumber(entityStats.topCityVotes, 0));
         }
-    });
+    }
 
     state.currentMaxMetric = maxMetric;
 
-    state.nodes.forEach((node) => {
+    state.nodes.forEach((node, nodeIndex) => {
         const marker = state.markerByNodeId.get(node.id);
         if (!marker) {
             return;
         }
 
-        const turnData = getTurnData(node);
-        const metric = getMetricValue(turnData, state.entityType, state.entityKey);
+        let metric = 0;
+        let hasTurnData = false;
+        if (turnContext && entityStats) {
+            hasTurnData = !!turnContext.hasTurnDataByNode[nodeIndex];
+            if (state.metricMode === 'percent') {
+                metric = Math.max(0, safeNumber(entityStats.percentByNode[nodeIndex], 0));
+            } else {
+                metric = Math.max(0, safeNumber(entityStats.votesByNode[nodeIndex], 0));
+            }
+        }
 
         const radius = getVoteRadius(metric, maxMetric);
         const baseStyle = {
             fillColor: getVoteColor(metric, maxMetric),
             color: '#ffffff',
-            weight: turnData && metric > 0 ? 0.55 : 0.35,
+            weight: hasTurnData && metric > 0 ? 0.55 : 0.35,
             opacity: 0.7,
             fillOpacity: getVoteFillOpacity(metric, maxMetric),
         };
@@ -865,6 +1166,7 @@ function configureCargoSelector() {
 
 function rebuildCitySearch(nodes) {
     state.nodeByNormalizedName = new Map();
+    state.nodeSearchEntries = [];
     cityListEl.innerHTML = '';
 
     nodes
@@ -875,6 +1177,7 @@ function rebuildCitySearch(nodes) {
             if (!state.nodeByNormalizedName.has(normalized)) {
                 state.nodeByNormalizedName.set(normalized, node);
             }
+            state.nodeSearchEntries.push({ normalized, node });
 
             const option = document.createElement('option');
             option.value = node.name;
@@ -895,13 +1198,12 @@ function findNodeBySearch(text) {
 
     let firstPrefix = null;
     let firstContains = null;
-    state.nodes.forEach((node) => {
-        const nodeNorm = normalizeText(node.name);
-        if (!firstPrefix && nodeNorm.startsWith(normalized)) {
-            firstPrefix = node;
+    state.nodeSearchEntries.forEach((entry) => {
+        if (!firstPrefix && entry.normalized.startsWith(normalized)) {
+            firstPrefix = entry.node;
         }
-        if (!firstContains && nodeNorm.includes(normalized)) {
-            firstContains = node;
+        if (!firstContains && entry.normalized.includes(normalized)) {
+            firstContains = entry.node;
         }
     });
     return firstPrefix || firstContains;
@@ -988,6 +1290,10 @@ function renderGraph(payload) {
     state.selectedNode = null;
     state.markerByNodeId = new Map();
     state.edgeLayers = [];
+    state.nodeByNormalizedName = new Map();
+    state.nodeSearchEntries = [];
+    state.nodeIndexById = new Map();
+    state.turnContexts = new Map();
     state.metricMode = metricSelectEl.value === 'percent' ? 'percent' : 'absolute';
     state.entityType = entityTypeSelectEl.value === 'candidate' ? 'candidate' : 'party';
     state.entityKey = null;
@@ -1085,6 +1391,7 @@ function renderGraph(payload) {
         map.fitBounds(bounds, { padding: [30, 30], maxZoom: 8 });
     }
 
+    buildTurnContexts(nodes);
     configureCargoSelector();
     rebuildCitySearch(nodes);
     applyEntityStyling();
@@ -1104,16 +1411,27 @@ async function fetchFirstAvailable(paths) {
     let lastError = null;
     for (const path of paths) {
         try {
-            const response = await fetch(path, { cache: 'no-store' });
+            const response = await fetch(path, { cache: 'default' });
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
             const payload = await response.json();
-            return { payload, path };
+            writeCachedPayload(path, payload);
+            return { payload, path, fromCache: false };
         } catch (error) {
             lastError = error;
         }
     }
+
+    const cached = readCachedPayload();
+    if (cached?.payload) {
+        return {
+            payload: cached.payload,
+            path: `${cached.path || 'cache-local'} (cache local)`,
+            fromCache: true,
+        };
+    }
+
     throw lastError || new Error('Nenhum arquivo de dados foi carregado.');
 }
 
@@ -1122,12 +1440,15 @@ async function loadGraphData() {
     setStatus('Carregando dados do grafo...', true);
 
     try {
-        const { payload, path } = await fetchFirstAvailable([
+        const { payload, path, fromCache } = await fetchFirstAvailable([
             'mg_graph_data.compact.json',
             'mg_graph_data.json',
         ]);
         state.loadedFile = path;
         renderGraph(payload);
+        if (fromCache) {
+            setStatus(`Dados carregados de cache local (${path}).`, false);
+        }
     } catch (error) {
         console.error('Failed to load map data:', error);
         showError(`Detalhe: ${error.message}`);

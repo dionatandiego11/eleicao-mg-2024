@@ -615,12 +615,69 @@ def build_compact_output(full_output: Dict[str, Any]) -> Dict[str, Any]:
         "neighbors_per_node": full_output.get("metadata", {}).get("neighbors_per_node"),
         "generated_at_utc": full_output.get("metadata", {}).get("generated_at_utc"),
         "election": full_output.get("metadata", {}).get("election"),
+        "quality": full_output.get("metadata", {}).get("quality"),
         "is_compact": True,
     }
     return {
         "metadata": compact_metadata,
         "nodes": compact_nodes,
         "edges": compact_edges,
+    }
+
+
+def build_quality_metadata(
+    *,
+    nodes_generated: int,
+    edges_generated: int,
+    skipped_missing_city_name: int,
+    skipped_invalid_geometry: int,
+    default_population_nodes: int,
+    election_stats_by_cargo: Dict[str, Dict[str, Any]],
+) -> Dict[str, Any]:
+    nodes_denominator = max(nodes_generated, 1)
+    skipped_total = skipped_missing_city_name + skipped_invalid_geometry
+
+    cargos_loaded = 0
+    cargos_failed = 0
+    cargos_skipped = 0
+    unmatched_municipalities_by_cargo: Dict[str, int] = {}
+    warnings: List[str] = []
+
+    for cargo_key, stats in election_stats_by_cargo.items():
+        status = str(stats.get("status", "not_loaded"))
+        if status == "loaded":
+            cargos_loaded += 1
+            unmatched = int(stats.get("municipalities_unmatched", 0))
+            unmatched_municipalities_by_cargo[cargo_key] = unmatched
+            if unmatched > 0:
+                warnings.append(
+                    f"{cargo_key}: {unmatched} municipalities in CSV were not matched to nodes."
+                )
+        elif status == "skipped_by_flag":
+            cargos_skipped += 1
+        elif status in {"load_failed", "not_loaded"}:
+            cargos_failed += 1
+
+    if default_population_nodes > 0:
+        warnings.append(
+            f"Default population fallback was used for {default_population_nodes} municipalities."
+        )
+    if skipped_total > 0:
+        warnings.append(f"{skipped_total} municipality features were skipped during node generation.")
+
+    return {
+        "nodes_generated": nodes_generated,
+        "edges_generated": edges_generated,
+        "nodes_skipped_total": skipped_total,
+        "nodes_skipped_missing_city_name": skipped_missing_city_name,
+        "nodes_skipped_invalid_geometry": skipped_invalid_geometry,
+        "nodes_with_default_population": default_population_nodes,
+        "default_population_rate_pct": round((default_population_nodes * 100.0) / nodes_denominator, 4),
+        "election_cargos_loaded": cargos_loaded,
+        "election_cargos_failed": cargos_failed,
+        "election_cargos_skipped": cargos_skipped,
+        "unmatched_municipalities_by_cargo": unmatched_municipalities_by_cargo,
+        "warnings": warnings,
     }
 
 
@@ -728,7 +785,9 @@ def main() -> int:
 
     print("Building nodes...")
     nodes = []
-    skipped = 0
+    skipped_missing_city_name = 0
+    skipped_invalid_geometry = 0
+    default_population_nodes = 0
     matched_election_city_keys_by_cargo: Dict[str, set[str]] = {
         cargo_key: set() for cargo_key in CARGO_CONFIG
     }
@@ -739,16 +798,19 @@ def main() -> int:
         city_id = str(properties.get("id", ""))
         city_name = city_names.get(city_id)
         if not city_name:
-            skipped += 1
+            skipped_missing_city_name += 1
             continue
 
         area_centroid = compute_geometry_area_and_centroid(geometry)
         if area_centroid is None:
-            skipped += 1
+            skipped_invalid_geometry += 1
             continue
 
         area_sq_km, centroid_lat, centroid_lng = area_centroid
-        population = population_map.get(city_id, DEFAULT_POPULATION)
+        population = population_map.get(city_id)
+        if population is None:
+            population = DEFAULT_POPULATION
+            default_population_nodes += 1
         density = population / max(area_sq_km, 1.0)
 
         node = {
@@ -777,7 +839,8 @@ def main() -> int:
         nodes.append(node)
 
     nodes.sort(key=lambda node: node["id"])
-    print(f"Nodes generated: {len(nodes)} (skipped: {skipped}).")
+    skipped_total = skipped_missing_city_name + skipped_invalid_geometry
+    print(f"Nodes generated: {len(nodes)} (skipped: {skipped_total}).")
 
     print(f"Building edges with {neighbors} nearest neighbors...")
     edges = build_knn_edges(nodes, k_neighbors=neighbors)
@@ -839,6 +902,23 @@ def main() -> int:
         "cargos": election_stats_by_cargo,
     }
 
+    quality_metadata = build_quality_metadata(
+        nodes_generated=len(nodes),
+        edges_generated=len(edges),
+        skipped_missing_city_name=skipped_missing_city_name,
+        skipped_invalid_geometry=skipped_invalid_geometry,
+        default_population_nodes=default_population_nodes,
+        election_stats_by_cargo=election_stats_by_cargo,
+    )
+
+    print(
+        "Data quality summary: "
+        f"default population fallback in {quality_metadata['nodes_with_default_population']} municipalities; "
+        f"skipped features {quality_metadata['nodes_skipped_total']}."
+    )
+    for warning in quality_metadata["warnings"]:
+        print(f"Quality warning: {warning}")
+
     output = {
         "metadata": {
             "state_code": STATE_CODE_MG,
@@ -846,6 +926,7 @@ def main() -> int:
             "neighbors_per_node": neighbors,
             "generated_at_utc": datetime.now(timezone.utc).isoformat(),
             "election": election_metadata,
+            "quality": quality_metadata,
         },
         "nodes": nodes,
         "edges": edges,

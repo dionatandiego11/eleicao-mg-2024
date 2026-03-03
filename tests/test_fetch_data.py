@@ -6,6 +6,7 @@ from pathlib import Path
 
 from fetch_data import (
     CARGO_CONFIG,
+    build_quality_metadata,
     load_municipal_election_results,
     normalize_municipality_name,
     parse_turns,
@@ -100,6 +101,34 @@ class ElectionCsvParserTests(unittest.TestCase):
         self.assertEqual(stats["rows_used_by_turn"]["1"], 3)
         self.assertEqual(stats["rows_used_by_turn"]["2"], 1)
         self.assertEqual(stats["municipalities_in_csv"], 2)
+
+
+class QualityMetadataTests(unittest.TestCase):
+    def test_quality_metadata_rollup(self):
+        quality = build_quality_metadata(
+            nodes_generated=10,
+            edges_generated=20,
+            skipped_missing_city_name=2,
+            skipped_invalid_geometry=1,
+            default_population_nodes=3,
+            election_stats_by_cargo={
+                "cargo_a": {"status": "loaded", "municipalities_unmatched": 0},
+                "cargo_b": {"status": "loaded", "municipalities_unmatched": 2},
+                "cargo_c": {"status": "load_failed"},
+                "cargo_d": {"status": "skipped_by_flag"},
+            },
+        )
+
+        self.assertEqual(quality["nodes_generated"], 10)
+        self.assertEqual(quality["edges_generated"], 20)
+        self.assertEqual(quality["nodes_skipped_total"], 3)
+        self.assertEqual(quality["nodes_with_default_population"], 3)
+        self.assertEqual(quality["default_population_rate_pct"], 30.0)
+        self.assertEqual(quality["election_cargos_loaded"], 2)
+        self.assertEqual(quality["election_cargos_failed"], 1)
+        self.assertEqual(quality["election_cargos_skipped"], 1)
+        self.assertEqual(quality["unmatched_municipalities_by_cargo"]["cargo_b"], 2)
+        self.assertTrue(quality["warnings"])
 
 
 class CoverageTests(unittest.TestCase):
