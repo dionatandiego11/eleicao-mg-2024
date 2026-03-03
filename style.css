@@ -170,6 +170,7 @@ header p {
 }
 
 #entity-select,
+#year-select,
 #cargo-select,
 #turn-select,
 #metric-select,
@@ -192,6 +193,7 @@ header p {
 }
 
 #entity-select:focus,
+#year-select:focus,
 #cargo-select:focus,
 #turn-select:focus,
 #metric-select:focus,

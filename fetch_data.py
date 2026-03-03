@@ -56,44 +56,71 @@ DEFAULT_ELECTION_PRESIDENTE_CSV = (
     "votacao_candidato-municipio_presidente_2022_mg.csv/"
     "votacao_candidato-municipio_presidente_2022_mg.csv"
 )
+DEFAULT_ELECTION_PREFEITO_2024_CSV = (
+    "votacao_candidato-municipio_prefeito_2024_mg.csv/"
+    "votacao_candidato-municipio_prefeito_2024_mg.csv"
+)
+DEFAULT_ELECTION_VEREADOR_2024_CSV = DEFAULT_ELECTION_PREFEITO_2024_CSV
 CARGO_DEPUTADO_ESTADUAL = "deputado_estadual"
 CARGO_DEPUTADO_FEDERAL = "deputado_federal"
 CARGO_SENADOR = "senador"
 CARGO_GOVERNADOR = "governador"
 CARGO_PRESIDENTE = "presidente"
+CARGO_PREFEITO = "prefeito"
+CARGO_VEREADOR = "vereador"
 CARGO_CONFIG = {
     CARGO_DEPUTADO_ESTADUAL: {
         "label": "Deputado Estadual",
+        "year": 2022,
         "cargo_code": "7",
         "default_csv": DEFAULT_ELECTION_ESTADUAL_CSV,
         "include_candidates": False,
     },
     CARGO_DEPUTADO_FEDERAL: {
         "label": "Deputado Federal",
+        "year": 2022,
         "cargo_code": "6",
         "default_csv": DEFAULT_ELECTION_FEDERAL_CSV,
         "include_candidates": False,
     },
     CARGO_SENADOR: {
         "label": "Senador",
+        "year": 2022,
         "cargo_code": "5",
         "default_csv": DEFAULT_ELECTION_SENADOR_CSV,
         "include_candidates": True,
     },
     CARGO_GOVERNADOR: {
         "label": "Governador",
+        "year": 2022,
         "cargo_code": "3",
         "default_csv": DEFAULT_ELECTION_GOVERNADOR_CSV,
         "include_candidates": True,
     },
     CARGO_PRESIDENTE: {
         "label": "Presidente",
+        "year": 2022,
         "cargo_code": "1",
         "default_csv": DEFAULT_ELECTION_PRESIDENTE_CSV,
         "include_candidates": True,
     },
+    CARGO_PREFEITO: {
+        "label": "Prefeito",
+        "year": 2024,
+        "cargo_code": "11",
+        "default_csv": DEFAULT_ELECTION_PREFEITO_2024_CSV,
+        "include_candidates": True,
+    },
+    CARGO_VEREADOR: {
+        "label": "Vereador",
+        "year": 2024,
+        "cargo_code": "13",
+        "default_csv": DEFAULT_ELECTION_VEREADOR_2024_CSV,
+        "include_candidates": False,
+    },
 }
 DEFAULT_ELECTION_TURNS = "1,2"
+DEFAULT_ELECTION_YEARS = "2022,2024"
 MUNICIPALITY_NAME_ALIASES = {
     # TSE dataset uses historical/alternate spellings for these 3 MG municipalities.
     "BARAO DE MONTE ALTO": "BARAO DO MONTE ALTO",
@@ -186,10 +213,34 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--election-csv-prefeito-2024",
+        default=DEFAULT_ELECTION_PREFEITO_2024_CSV,
+        help=(
+            "Path to municipal election CSV (TSE) containing prefeito 2024 rows. "
+            f"Default: {DEFAULT_ELECTION_PREFEITO_2024_CSV}"
+        ),
+    )
+    parser.add_argument(
+        "--election-csv-vereador-2024",
+        default=DEFAULT_ELECTION_VEREADOR_2024_CSV,
+        help=(
+            "Path to municipal election CSV (TSE) containing vereador 2024 rows. "
+            f"Default: {DEFAULT_ELECTION_VEREADOR_2024_CSV}"
+        ),
+    )
+    parser.add_argument(
         "--election-year",
         type=int,
-        default=2022,
-        help="Election year for CSV filter. Default: 2022",
+        default=None,
+        help=(
+            "Deprecated single election year filter. "
+            "If provided, overrides --election-years."
+        ),
+    )
+    parser.add_argument(
+        "--election-years",
+        default=DEFAULT_ELECTION_YEARS,
+        help=f"Comma-separated election years to load. Default: {DEFAULT_ELECTION_YEARS}",
     )
     parser.add_argument(
         "--election-turn",
@@ -323,6 +374,29 @@ def parse_turns(turns_expr: str, single_turn: int | None = None) -> List[int]:
     if not turns:
         raise ValueError("No valid election turns provided.")
     return turns
+
+
+def parse_years(years_expr: str, single_year: int | None = None) -> List[int]:
+    if single_year is not None:
+        return [int(single_year)]
+
+    years: List[int] = []
+    for chunk in str(years_expr or "").split(","):
+        token = chunk.strip()
+        if not token:
+            continue
+        try:
+            value = int(token)
+        except ValueError as error:
+            raise ValueError(f"Invalid election year token: {token}") from error
+        if value < 1900:
+            raise ValueError(f"Election year must be >= 1900: {value}")
+        if value not in years:
+            years.append(value)
+
+    if not years:
+        raise ValueError("No valid election years provided.")
+    return years
 
 
 def load_municipal_election_results(
@@ -562,6 +636,76 @@ def compute_geometry_area_and_centroid(geometry: Dict) -> Tuple[float, float, fl
     return None
 
 
+def is_year_key(key: object) -> bool:
+    text = str(key or "").strip()
+    return len(text) == 4 and text.isdigit()
+
+
+def compact_turn_entry(turn_data: Dict[str, Any]) -> Dict[str, Any]:
+    compact_turn = {
+        "turn": turn_data.get("turn"),
+        "valid_votes_total": turn_data.get("valid_votes_total", 0),
+        "leader_party": turn_data.get("leader_party"),
+        "leader_party_votes": turn_data.get("leader_party_votes", 0),
+        "party_votes": turn_data.get("party_votes", {}),
+    }
+    if "candidate_votes" in turn_data:
+        compact_turn["candidate_votes"] = [
+            {
+                "candidate_id": cand.get("candidate_id"),
+                "number": cand.get("number"),
+                "ballot_name": cand.get("ballot_name"),
+                "party": cand.get("party"),
+                "votes": cand.get("votes", 0),
+            }
+            for cand in turn_data.get("candidate_votes", [])
+        ]
+        compact_turn["leader_candidate_id"] = turn_data.get("leader_candidate_id")
+        compact_turn["leader_candidate_name"] = turn_data.get("leader_candidate_name")
+        compact_turn["leader_candidate_votes"] = turn_data.get("leader_candidate_votes", 0)
+    return compact_turn
+
+
+def compact_cargos_payload(cargos_payload: Dict[str, Any]) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    compact_cargos: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for cargo_key, turns_payload_raw in (cargos_payload or {}).items():
+        if not isinstance(turns_payload_raw, dict):
+            continue
+
+        if "party_votes" in turns_payload_raw:
+            turns_payload: Dict[str, Any] = {"1": turns_payload_raw}
+        else:
+            turns_payload = turns_payload_raw
+
+        compact_turns: Dict[str, Dict[str, Any]] = {}
+        for turn_key, turn_data in turns_payload.items():
+            if not isinstance(turn_data, dict):
+                continue
+            compact_turns[str(turn_key)] = compact_turn_entry(turn_data)
+
+        if compact_turns:
+            compact_cargos[str(cargo_key)] = compact_turns
+    return compact_cargos
+
+
+def compact_election_payload(election_payload: Dict[str, Any]) -> Dict[str, Any]:
+    payload = election_payload or {}
+    if not isinstance(payload, dict):
+        return {}
+
+    top_keys = list(payload.keys())
+    has_year_shape = bool(top_keys) and all(is_year_key(key) for key in top_keys)
+    if has_year_shape:
+        compact_by_year: Dict[str, Any] = {}
+        for year_key, cargos_payload in payload.items():
+            compact_cargos = compact_cargos_payload(cargos_payload if isinstance(cargos_payload, dict) else {})
+            if compact_cargos:
+                compact_by_year[str(year_key)] = compact_cargos
+        return compact_by_year
+
+    return compact_cargos_payload(payload)
+
+
 def build_compact_output(full_output: Dict[str, Any]) -> Dict[str, Any]:
     compact_nodes = []
     for node in full_output.get("nodes", []):
@@ -574,34 +718,9 @@ def build_compact_output(full_output: Dict[str, Any]) -> Dict[str, Any]:
         }
         election_payload = node.get("election")
         if election_payload:
-            compact_election: Dict[str, Dict[str, Dict]] = {}
-            for cargo_key, turns_payload in election_payload.items():
-                compact_turns: Dict[str, Dict] = {}
-                for turn_key, turn_data in turns_payload.items():
-                    compact_turn_entry = {
-                        "turn": turn_data.get("turn"),
-                        "valid_votes_total": turn_data.get("valid_votes_total", 0),
-                        "leader_party": turn_data.get("leader_party"),
-                        "leader_party_votes": turn_data.get("leader_party_votes", 0),
-                        "party_votes": turn_data.get("party_votes", {}),
-                    }
-                    if "candidate_votes" in turn_data:
-                        compact_turn_entry["candidate_votes"] = [
-                            {
-                                "candidate_id": cand.get("candidate_id"),
-                                "number": cand.get("number"),
-                                "ballot_name": cand.get("ballot_name"),
-                                "party": cand.get("party"),
-                                "votes": cand.get("votes", 0),
-                            }
-                            for cand in turn_data.get("candidate_votes", [])
-                        ]
-                        compact_turn_entry["leader_candidate_id"] = turn_data.get("leader_candidate_id")
-                        compact_turn_entry["leader_candidate_name"] = turn_data.get("leader_candidate_name")
-                        compact_turn_entry["leader_candidate_votes"] = turn_data.get("leader_candidate_votes", 0)
-                    compact_turns[str(turn_key)] = compact_turn_entry
-                compact_election[cargo_key] = compact_turns
-            compact_node["election"] = compact_election
+            compact_election = compact_election_payload(election_payload)
+            if compact_election:
+                compact_node["election"] = compact_election
         compact_nodes.append(compact_node)
 
     compact_edges = [
@@ -688,6 +807,7 @@ def main() -> int:
     args = parse_args()
     neighbors = max(args.neighbors, 1)
     turns = parse_turns(args.election_turns, single_turn=args.election_turn)
+    years = parse_years(args.election_years, single_year=args.election_year)
 
     print("Fetching municipalities list for Minas Gerais...")
     cities_data = get_json(URL_CITIES, timeout=args.timeout, retries=args.retries)
@@ -714,32 +834,47 @@ def main() -> int:
         CARGO_SENADOR: args.election_csv_senador,
         CARGO_GOVERNADOR: args.election_csv_governador,
         CARGO_PRESIDENTE: args.election_csv_presidente,
+        CARGO_PREFEITO: args.election_csv_prefeito_2024,
+        CARGO_VEREADOR: args.election_csv_vereador_2024,
     }
+    enabled_cargo_keys = [
+        cargo_key
+        for cargo_key, cargo_cfg in CARGO_CONFIG.items()
+        if int(cargo_cfg.get("year", 0)) in years
+    ]
+    if not enabled_cargo_keys:
+        raise RuntimeError(f"No cargo configuration available for requested years: {years}")
+
+    years_loaded_text = ", ".join(str(year) for year in years)
+    print(f"Election years requested: {years_loaded_text}")
+
     election_by_city_by_cargo: Dict[str, Dict[str, Dict[str, Dict]]] = {
-        cargo_key: {} for cargo_key in CARGO_CONFIG
+        cargo_key: {} for cargo_key in enabled_cargo_keys
     }
     election_stats_by_cargo: Dict[str, Dict[str, Any]] = {}
 
     if args.skip_election:
         print("Election enrichment skipped by flag.")
-        for cargo_key, cargo_cfg in CARGO_CONFIG.items():
+        for cargo_key in enabled_cargo_keys:
+            cargo_cfg = CARGO_CONFIG[cargo_key]
             election_stats_by_cargo[cargo_key] = {
                 "enabled": False,
                 "status": "skipped_by_flag",
                 "cargo_code": cargo_cfg["cargo_code"],
                 "cargo_label": cargo_cfg["label"],
                 "source_csv": election_csv_by_cargo[cargo_key],
-                "year": args.election_year,
+                "year": int(cargo_cfg["year"]),
                 "turns_requested": turns,
             }
     else:
-        for cargo_key, cargo_cfg in CARGO_CONFIG.items():
+        for cargo_key in enabled_cargo_keys:
+            cargo_cfg = CARGO_CONFIG[cargo_key]
             csv_path = election_csv_by_cargo[cargo_key]
-            print(f"Loading municipal election CSV for {cargo_cfg['label']}...")
+            print(f"Loading municipal election CSV for {cargo_cfg['label']} ({cargo_cfg['year']})...")
             try:
                 election_by_city, loaded_stats = load_municipal_election_results(
                     csv_path=csv_path,
-                    year=args.election_year,
+                    year=int(cargo_cfg["year"]),
                     turns=turns,
                     cargo_code=cargo_cfg["cargo_code"],
                     include_candidates=bool(cargo_cfg.get("include_candidates", False)),
@@ -751,7 +886,7 @@ def main() -> int:
                     "cargo_code": cargo_cfg["cargo_code"],
                     "cargo_label": cargo_cfg["label"],
                     "source_csv": csv_path,
-                    "year": args.election_year,
+                    "year": int(cargo_cfg["year"]),
                     "turns_requested": turns,
                     "turns_found": loaded_stats["turns_found"],
                     "rows_used_by_turn": loaded_stats["rows_used_by_turn"],
@@ -761,7 +896,7 @@ def main() -> int:
                     "include_candidates": loaded_stats["include_candidates"],
                 }
                 print(
-                    f"{cargo_cfg['label']} loaded: "
+                    f"{cargo_cfg['label']} ({cargo_cfg['year']}) loaded: "
                     f"{loaded_stats['municipalities_in_csv']} municipalities, "
                     f"{loaded_stats['parties_found']} parties, turns {loaded_stats['turns_found']}."
                 )
@@ -773,12 +908,12 @@ def main() -> int:
                     "cargo_code": cargo_cfg["cargo_code"],
                     "cargo_label": cargo_cfg["label"],
                     "source_csv": csv_path,
-                    "year": args.election_year,
+                    "year": int(cargo_cfg["year"]),
                     "turns_requested": turns,
                     "error": str(election_error),
                 }
                 print(
-                    f"Election enrichment unavailable for {cargo_cfg['label']} "
+                    f"Election enrichment unavailable for {cargo_cfg['label']} ({cargo_cfg['year']}) "
                     f"({election_error}). Continuing."
                 )
 
@@ -792,7 +927,7 @@ def main() -> int:
     skipped_invalid_geometry = 0
     default_population_nodes = 0
     matched_election_city_keys_by_cargo: Dict[str, set[str]] = {
-        cargo_key: set() for cargo_key in CARGO_CONFIG
+        cargo_key: set() for cargo_key in enabled_cargo_keys
     }
     nodes_with_any_election_data = 0
     for feature in features:
@@ -827,16 +962,23 @@ def main() -> int:
         }
 
         city_key = normalize_municipality_name(city_name)
-        election_payload_by_cargo: Dict[str, Dict[str, Dict]] = {}
-        for cargo_key, election_by_city in election_by_city_by_cargo.items():
+        election_payload_by_year: Dict[str, Dict[str, Dict[str, Dict]]] = {}
+        for cargo_key in enabled_cargo_keys:
+            election_by_city = election_by_city_by_cargo.get(cargo_key, {})
             turns_payload = election_by_city.get(city_key)
             if turns_payload:
                 turns_sorted = sorted(turns_payload.keys(), key=lambda turn_key: int(turn_key))
-                election_payload_by_cargo[cargo_key] = {turn_key: turns_payload[turn_key] for turn_key in turns_sorted}
+                year_key = str(CARGO_CONFIG[cargo_key]["year"])
+                if year_key not in election_payload_by_year:
+                    election_payload_by_year[year_key] = {}
+                election_payload_by_year[year_key][cargo_key] = {
+                    turn_key: turns_payload[turn_key]
+                    for turn_key in turns_sorted
+                }
                 matched_election_city_keys_by_cargo[cargo_key].add(city_key)
 
-        if election_payload_by_cargo:
-            node["election"] = election_payload_by_cargo
+        if election_payload_by_year:
+            node["election"] = election_payload_by_year
             nodes_with_any_election_data += 1
 
         nodes.append(node)
@@ -849,7 +991,8 @@ def main() -> int:
     edges = build_knn_edges(nodes, k_neighbors=neighbors)
     edges.sort(key=lambda edge: edge["id"])
 
-    for cargo_key, cargo_cfg in CARGO_CONFIG.items():
+    for cargo_key in enabled_cargo_keys:
+        cargo_cfg = CARGO_CONFIG[cargo_key]
         election_stats = election_stats_by_cargo.get(cargo_key, {})
         if election_stats.get("status") != "loaded":
             continue
@@ -875,12 +1018,12 @@ def main() -> int:
         )
 
         print(
-            f"Election coverage on nodes ({cargo_cfg['label']}): "
+            f"Election coverage on nodes ({cargo_cfg['label']} {cargo_cfg['year']}): "
             f"{len(matched_keys)}/{len(nodes)} municipalities matched."
         )
         if unmatched_election_cities > 0:
             print(
-                f"Unmatched election municipalities for {cargo_cfg['label']} "
+                f"Unmatched election municipalities for {cargo_cfg['label']} {cargo_cfg['year']} "
                 f"(name mismatch): {unmatched_election_cities}"
             )
 
@@ -896,13 +1039,40 @@ def main() -> int:
     else:
         overall_election_status = "not_loaded"
 
+    election_stats_by_year: Dict[str, Dict[str, Any]] = {}
+    for cargo_key, stats in election_stats_by_cargo.items():
+        year_key = str(stats.get("year", CARGO_CONFIG[cargo_key]["year"]))
+        year_bucket = election_stats_by_year.setdefault(
+            year_key,
+            {
+                "status": "not_loaded",
+                "turns_requested": turns,
+                "cargos": {},
+            },
+        )
+        year_bucket["cargos"][cargo_key] = stats
+
+    for year_key, year_bucket in election_stats_by_year.items():
+        year_status_set = {entry.get("status", "not_loaded") for entry in year_bucket["cargos"].values()}
+        if year_status_set == {"skipped_by_flag"}:
+            year_bucket["status"] = "skipped_by_flag"
+        elif year_status_set == {"loaded"}:
+            year_bucket["status"] = "loaded"
+        elif "loaded" in year_status_set:
+            year_bucket["status"] = "partial"
+        elif "load_failed" in year_status_set:
+            year_bucket["status"] = "load_failed"
+        else:
+            year_bucket["status"] = "not_loaded"
+
     election_metadata = {
         "enabled": any(stats.get("status") == "loaded" for stats in election_stats_by_cargo.values()),
         "status": overall_election_status,
-        "year": args.election_year,
+        "years_requested": years,
         "turns_requested": turns,
         "nodes_with_any_election_data": nodes_with_any_election_data,
         "cargos": election_stats_by_cargo,
+        "years": dict(sorted(election_stats_by_year.items(), key=lambda item: int(item[0]))),
     }
 
     quality_metadata = build_quality_metadata(

@@ -30,6 +30,13 @@
         <div class="filter-panel" id="filter-panel">
             <div class="filter-grid">
                 <div class="filter-field">
+                    <label for="year-select">Ano</label>
+                    <select id="year-select">
+                        <option value="">Carregando anos...</option>
+                    </select>
+                </div>
+
+                <div class="filter-field">
                     <label for="cargo-select">Cargo</label>
                     <select id="cargo-select">
                         <option value="">Carregando cargos...</option>
@@ -92,6 +99,7 @@
 
         <div class="city-info" id="city-info" hidden>
             <h2 id="info-name">Nome da Cidade</h2>
+            <p><strong>Ano:</strong> <span id="info-selected-year"></span></p>
             <p><strong>Cargo:</strong> <span id="info-selected-cargo"></span></p>
             <p><strong>Turno:</strong> <span id="info-selected-turn"></span></p>
             <p><strong>Recorte:</strong> <span id="info-selected-entity-type"></span></p>

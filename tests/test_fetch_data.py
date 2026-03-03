@@ -10,6 +10,7 @@ from fetch_data import (
     compute_geometry_area_and_centroid,
     load_municipal_election_results,
     normalize_municipality_name,
+    parse_years,
     parse_turns,
 )
 
@@ -28,6 +29,22 @@ class ParseTurnsTests(unittest.TestCase):
     def test_parse_turns_invalid_value(self):
         with self.assertRaises(ValueError):
             parse_turns("0")
+
+
+class ParseYearsTests(unittest.TestCase):
+    def test_parse_years_multi(self):
+        self.assertEqual(parse_years("2022,2024,2024"), [2022, 2024])
+
+    def test_parse_years_single_override(self):
+        self.assertEqual(parse_years("2022,2024", single_year=2024), [2024])
+
+    def test_parse_years_invalid_token(self):
+        with self.assertRaises(ValueError):
+            parse_years("2022,abc")
+
+    def test_parse_years_invalid_value(self):
+        with self.assertRaises(ValueError):
+            parse_years("1800")
 
 
 class MunicipalityNormalizationTests(unittest.TestCase):
@@ -177,6 +194,11 @@ class CoverageTests(unittest.TestCase):
         cargos_meta = payload.get("metadata", {}).get("election", {}).get("cargos", {})
         if not cargos_meta:
             self.fail("Election metadata not found in mg_graph_data.json")
+
+        years_meta = payload.get("metadata", {}).get("election", {}).get("years", {})
+        self.assertTrue(years_meta, "Election metadata by year not found in mg_graph_data.json")
+        self.assertIn("2022", years_meta)
+        self.assertIn("2024", years_meta)
 
         for cargo_key in CARGO_CONFIG:
             cargo_meta = cargos_meta.get(cargo_key)
