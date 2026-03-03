@@ -988,7 +988,9 @@ function applyDeclutter() {
         const metric = Math.max(0, safeNumber(marker._metricValue, 0));
         const ratio = maxMetric > 0 ? metric / maxMetric : 0;
         const isSelected = state.selectedMarker === marker;
-        const visible = isSelected || ratio >= profile.minRatio;
+        const shouldUseRatioDeclutter = state.metricMode === 'percent';
+        const passesRatioThreshold = !shouldUseRatioDeclutter || ratio >= profile.minRatio;
+        const visible = isSelected || (metric > 0 && passesRatioThreshold);
 
         marker._hiddenByZoom = !visible;
         if (!visible) {
