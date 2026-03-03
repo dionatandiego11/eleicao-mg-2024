@@ -7,6 +7,7 @@ from pathlib import Path
 from fetch_data import (
     CARGO_CONFIG,
     build_quality_metadata,
+    compute_geometry_area_and_centroid,
     load_municipal_election_results,
     normalize_municipality_name,
     parse_turns,
@@ -129,6 +130,39 @@ class QualityMetadataTests(unittest.TestCase):
         self.assertEqual(quality["election_cargos_skipped"], 1)
         self.assertEqual(quality["unmatched_municipalities_by_cargo"]["cargo_b"], 2)
         self.assertTrue(quality["warnings"])
+
+
+class GeometryProjectionTests(unittest.TestCase):
+    def test_polygon_hole_reduces_area(self):
+        # Outer square with a centered inner square (hole).
+        outer_ring = [
+            [0.0, 0.0],
+            [2.0, 0.0],
+            [2.0, 2.0],
+            [0.0, 2.0],
+            [0.0, 0.0],
+        ]
+        inner_hole = [
+            [0.5, 0.5],
+            [1.5, 0.5],
+            [1.5, 1.5],
+            [0.5, 1.5],
+            [0.5, 0.5],
+        ]
+        polygon_without_hole = {"type": "Polygon", "coordinates": [outer_ring]}
+        polygon_with_hole = {"type": "Polygon", "coordinates": [outer_ring, inner_hole]}
+
+        no_hole = compute_geometry_area_and_centroid(polygon_without_hole)
+        with_hole = compute_geometry_area_and_centroid(polygon_with_hole)
+
+        self.assertIsNotNone(no_hole)
+        self.assertIsNotNone(with_hole)
+        area_without_hole = float(no_hole[0])
+        area_with_hole = float(with_hole[0])
+
+        self.assertGreater(area_without_hole, 0.0)
+        self.assertGreater(area_with_hole, 0.0)
+        self.assertLess(area_with_hole, area_without_hole)
 
 
 class CoverageTests(unittest.TestCase):

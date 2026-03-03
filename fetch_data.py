@@ -524,29 +524,32 @@ def compute_geometry_area_and_centroid(geometry: Dict) -> Tuple[float, float, fl
     if geom_type not in {"Polygon", "MultiPolygon"}:
         return None
 
-    rings = []
+    rings_with_sign: List[Tuple[List[List[float]], int]] = []
     if geom_type == "Polygon":
-        if coordinates:
-            rings.append(coordinates[0])
+        for ring_index, ring in enumerate(coordinates):
+            sign = 1 if ring_index == 0 else -1
+            rings_with_sign.append((ring, sign))
     else:
         for polygon in coordinates:
-            if polygon:
-                rings.append(polygon[0])
+            for ring_index, ring in enumerate(polygon or []):
+                sign = 1 if ring_index == 0 else -1
+                rings_with_sign.append((ring, sign))
 
     weighted_area = 0.0
     weighted_lat = 0.0
     weighted_lng = 0.0
     fallback_points: List[List[float]] = []
 
-    for ring in rings:
+    for ring, sign in rings_with_sign:
         if not ring:
             continue
         fallback_points.extend(ring)
         area, lat, lng = compute_ring_area_and_centroid(ring)
         if area > 0:
-            weighted_area += area
-            weighted_lat += lat * area
-            weighted_lng += lng * area
+            signed_area = area * sign
+            weighted_area += signed_area
+            weighted_lat += lat * signed_area
+            weighted_lng += lng * signed_area
 
     if weighted_area > 0:
         return weighted_area, (weighted_lat / weighted_area), (weighted_lng / weighted_area)
