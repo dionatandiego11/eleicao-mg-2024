@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Raw Data (CSVs from TSE are very large and don't need to be in the repo)
+votacao_candidato-municipio_*/
+*.csv
+
+# Intermediate / Full JSON Data (The app should use the compact version in production, but if you want to version the compact one, we ignore the others)
+mg_graph_data.json
+temp.json
+
+# Logs
+*.log
+server.err.log
+server.out.log
+
+# OS generated files
+.DS_Store
+Thumbs.db

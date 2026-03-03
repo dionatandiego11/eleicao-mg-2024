@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Minas Gerais - Mapa Eleitoral Municipal</title>
+
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="ui-container">
+        <header>
+            <h1>Minas Gerais</h1>
+            <p>Mapa por cargo, turno e entidade (partido/candidato)</p>
+        </header>
+
+        <div class="stats-panel">
+            <div class="stat-box">
+                <span class="stat-label">Total de Cidades</span>
+                <span class="stat-value" id="total-cities">--</span>
+            </div>
+            <div class="stat-box">
+                <span class="stat-label">Conexoes Geradas</span>
+                <span class="stat-value" id="total-edges">--</span>
+            </div>
+        </div>
+
+        <div class="filter-panel" id="filter-panel">
+            <div class="filter-grid">
+                <div class="filter-field">
+                    <label for="cargo-select">Cargo</label>
+                    <select id="cargo-select">
+                        <option value="">Carregando cargos...</option>
+                    </select>
+                </div>
+
+                <div class="filter-field">
+                    <label for="turn-select">Turno</label>
+                    <select id="turn-select">
+                        <option value="">Carregando turnos...</option>
+                    </select>
+                </div>
+
+                <div class="filter-field">
+                    <label for="metric-select">Modo</label>
+                    <select id="metric-select">
+                        <option value="absolute">Votos brutos</option>
+                        <option value="percent">% do total da cidade</option>
+                    </select>
+                </div>
+
+                <div class="filter-field">
+                    <label for="entity-type-select">Recorte</label>
+                    <select id="entity-type-select">
+                        <option value="party">Partido</option>
+                        <option value="candidate">Candidato</option>
+                    </select>
+                </div>
+
+                <div class="filter-field filter-span-2">
+                    <label for="entity-select">Entidade</label>
+                    <select id="entity-select">
+                        <option value="">Carregando entidades...</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="search-block">
+                <label for="city-search">Busca de municipio</label>
+                <div class="search-row">
+                    <input id="city-search" type="text" list="city-list" placeholder="Ex.: Belo Horizonte">
+                    <button type="button" id="city-search-btn">Ir</button>
+                </div>
+            </div>
+
+            <datalist id="city-list"></datalist>
+            <p class="search-hint" id="search-hint">Digite um municipio para centralizar e destacar.</p>
+            <p id="entity-summary">Selecione uma entidade para ver o resumo estadual.</p>
+
+            <div class="legend legend-inline">
+                <h3 id="legend-title">Votos Brutos por Cidade</h3>
+                <div class="gradient-bar"></div>
+                <div class="legend-labels">
+                    <span id="legend-low">0</span>
+                    <span id="legend-mid">--</span>
+                    <span id="legend-high">--</span>
+                </div>
+            </div>
+        </div>
+
+        <div class="city-info" id="city-info" hidden>
+            <h2 id="info-name">Nome da Cidade</h2>
+            <p><strong>Cargo:</strong> <span id="info-selected-cargo"></span></p>
+            <p><strong>Turno:</strong> <span id="info-selected-turn"></span></p>
+            <p><strong>Recorte:</strong> <span id="info-selected-entity-type"></span></p>
+            <p><strong>Entidade:</strong> <span id="info-selected-entity"></span></p>
+            <p><strong>Valor na Cidade:</strong> <span id="info-selected-value"></span></p>
+            <p><strong>Media do Estado:</strong> <span id="info-state-avg-value"></span></p>
+            <p><strong>Diferenca vs Media:</strong> <span id="info-state-delta"></span></p>
+            <p><strong>Total de Votos na Cidade:</strong> <span id="info-valid-votes"></span></p>
+            <p><strong>Partido Lider:</strong> <span id="info-leader-party"></span> (<span id="info-leader-votes"></span> votos)</p>
+            <p><strong>Candidato Lider:</strong> <span id="info-leader-candidate"></span></p>
+            <p><strong>Area:</strong> <span id="info-area"></span> km2</p>
+        </div>
+
+        <div class="status-box" id="status-box" aria-live="polite">
+            <p id="status-text">Carregando dados...</p>
+        </div>
+
+        <div class="error-box" id="error-box" hidden>
+            <h2>Falha ao carregar dados</h2>
+            <p id="error-text">Nao foi possivel carregar o arquivo mg_graph_data.json.</p>
+            <button type="button" id="retry-btn">Tentar novamente</button>
+        </div>
+    </div>
+
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://d3js.org/d3-color.v3.min.js"></script>
+    <script src="https://d3js.org/d3-interpolate.v3.min.js"></script>
+    <script src="https://d3js.org/d3-scale-chromatic.v3.min.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>
